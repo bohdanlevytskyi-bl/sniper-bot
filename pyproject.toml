@@ -1,0 +1,38 @@
+[project]
+name = "sniper-bot"
+version = "0.1.0"
+description = "AI-assisted Bybit spot trading bot for BTCUSDT trend following."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.14.1",
+    "httpx>=0.28.1",
+    "pandas>=2.2.3",
+    "pydantic>=2.10.6",
+    "PyYAML>=6.0.2",
+    "sqlalchemy>=2.0.38",
+    "tenacity>=9.0.0",
+    "typer>=0.15.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[project.scripts]
+sniper-bot = "sniper_bot.cli:main"
+
+[build-system]
+requires = ["setuptools>=75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

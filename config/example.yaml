@@ -1,0 +1,57 @@
+mode: paper
+pair: BTCUSDT
+timeframe_minutes: 60
+timezone: local
+
+paths:
+  paper_db: ../data/bybit-paper.sqlite
+  demo_db: ../data/bybit-demo.sqlite
+  live_db: ../data/bybit-live.sqlite
+  log_dir: ../logs
+
+exchange:
+  environment: demo
+  account_type: UNIFIED
+  live_base_url: https://api.bybit.com
+  demo_base_url: https://api-demo.bybit.com
+  timeout_seconds: 20
+  recv_window_ms: 5000
+  user_agent: sniper-bot/0.1.0
+  max_public_candles: 1000
+
+strategy:
+  ema_fast: 50
+  ema_slow: 200
+  slope_lookback_bars: 3
+  atr_period: 14
+  atr_stop_multiple: 2.0
+  bar_close_only: true
+
+risk:
+  max_position_pct: 0.25
+  max_daily_loss_pct: 0.02
+  max_drawdown_pct: 0.08
+  cooldown_losses: 2
+  cooldown_hours: 24
+  initial_paper_cash: 10000
+
+execution:
+  quote_asset: USDT
+  slippage_bps: 5
+  fee_rate: 0.004
+  poll_interval_seconds: 60
+
+alerts:
+  enabled: true
+
+ai:
+  enabled: true
+  model: gpt-5-mini-2025-08-07
+  regime_lookback_bars: 48
+  summary_hour: 0
+  summary_minute: 5
+
+backtest:
+  starting_cash: 10000
+  slippage_bps: 5
+  fee_rate: 0.004
