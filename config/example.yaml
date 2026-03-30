@@ -1,0 +1,67 @@
+mode: paper
+
+exchange:
+  environment: demo
+  account_type: UNIFIED
+  live_base_url: https://api.bybit.com
+  demo_base_url: https://api-demo.bybit.com
+  timeout_seconds: 20
+  recv_window_ms: 5000
+  user_agent: sniper-bot/2.0.0
+
+scanner:
+  quote_asset: USDT
+  min_volume_24h_usd: 50000
+  min_turnover_24h_usd: 100000
+  max_price_change_24h_pct: 0.50
+  excluded_pairs: [USDCUSDT, DAIUSDT, TUSDUSDT]
+  max_candidates_to_enrich: 10
+
+strategy:
+  volume_spike_threshold: 3.0
+  momentum_windows_minutes: [5, 15, 60]
+  volume_weight: 0.4
+  momentum_weight: 0.4
+  relative_strength_weight: 0.2
+  min_entry_score: 0.4
+  max_entries_per_cycle: 1
+
+position:
+  trailing_stop_pct: 0.15
+  hard_stop_pct: 0.25
+  take_profit_multiple: 2.0
+  time_decay_hours: 8
+  time_decay_min_gain_pct: 0.05
+  max_hold_hours: 72
+
+risk:
+  max_position_pct: 0.20
+  max_concurrent_positions: 2
+  max_portfolio_exposure_pct: 0.40
+  max_daily_loss_pct: 0.10
+  max_drawdown_pct: 0.15
+  cooldown_losses: 10
+  cooldown_hours: 1
+  initial_paper_cash: 100
+
+execution:
+  slippage_bps: 10
+  fee_rate: 0.001
+  poll_interval_seconds: 30
+
+auto_tune:
+  enabled: true               # set to true to enable AI auto-tuning
+  tune_every_n_cycles: 100     # every ~50 minutes
+  openai_model: gpt-5.4
+  max_change_pct: 0.30         # max 30% change per parameter per tune
+  require_min_cycles: 200      # need at least 200 cycles of data
+  require_min_trades: 3        # need at least 3 closed trades
+
+alerts:
+  enabled: false
+
+paths:
+  paper_db: data/paper.sqlite
+  demo_db: data/demo.sqlite
+  live_db: data/live.sqlite
+  log_dir: logs
