@@ -215,6 +215,17 @@ def analyze(
         typer.echo(f"\n--- Data: {result['data_summary']['cycles_analyzed']} cycles, "
                    f"{result['data_summary']['trades_analyzed']} trades ---\n")
 
+        health = result.get("health_score", {})
+        if health:
+            typer.echo(f"Strategy Health Score: {health.get('composite', 0)}/100")
+            comps = health.get("components", {})
+            typer.echo(f"  Profit Factor: {health.get('profit_factor', 0)} ({comps.get('profit_factor_pts', 0)}/25 pts)")
+            typer.echo(f"  Risk-Adjusted: {health.get('risk_adjusted', 0)} ({comps.get('risk_adjusted_pts', 0)}/25 pts)")
+            typer.echo(f"  Capture Eff:   {health.get('capture_efficiency', 0):.1%} ({comps.get('capture_pts', 0)}/20 pts)")
+            typer.echo(f"  Trade Freq:    {health.get('trade_frequency_per_100_cycles', 0)}/100cyc ({comps.get('frequency_pts', 0)}/15 pts)")
+            typer.echo(f"  DD Penalty:    {health.get('max_drawdown_pct', 0):.1%} (-{comps.get('drawdown_penalty', 0)} pts)")
+            typer.echo()
+
         typer.echo(f"Assessment: {result.get('assessment', 'N/A')}\n")
         typer.echo(f"Confidence: {result.get('confidence', 'N/A')}\n")
 
@@ -279,6 +290,47 @@ def tune_history_cmd(
             rejected = r.rejected_changes or {}
             if rejected:
                 typer.echo(f"Rejected: {list(rejected.keys())}")
+    finally:
+        runtime.close()
+
+
+@app.command()
+def rollback(
+    config: Path = typer.Option("config/example.yaml", "--config", "-c", help="Path to config YAML"),
+    mode: str = typer.Option("paper", "--mode", "-m", help="Mode: paper, demo, live"),
+) -> None:
+    """Rollback to the last pre-tune config snapshot."""
+    from sqlalchemy import desc, select
+
+    from sniper_bot.ai_advisor import restore_config_from_snapshot
+    from sniper_bot.app import create_runtime
+    from sniper_bot.storage import PreTuneSnapshot
+
+    runtime = create_runtime(config, mode=mode)
+    try:
+        with runtime.db.session() as session:
+            snap = session.scalar(
+                select(PreTuneSnapshot)
+                .where(PreTuneSnapshot.mode == mode, PreTuneSnapshot.rolled_back == 0)
+                .order_by(desc(PreTuneSnapshot.recorded_at))
+                .limit(1)
+            )
+            if snap is None:
+                typer.echo("No pre-tune snapshot found to rollback to.")
+                raise typer.Exit(1)
+
+            typer.echo(f"Snapshot from cycle {snap.trigger_cycle} ({snap.recorded_at})")
+            typer.echo(f"Config: {json.dumps(snap.config_snapshot, indent=2)}")
+
+            if not typer.confirm("Restore this config?"):
+                typer.echo("Cancelled.")
+                raise typer.Exit(0)
+
+            restore_config_from_snapshot(runtime.config, snap.config_snapshot)
+            snap.rolled_back = 1
+            session.commit()
+
+        typer.echo("Config restored from snapshot. Restart the bot to apply.")
     finally:
         runtime.close()
 

@@ -131,11 +131,20 @@ class PathsConfig(BaseModel):
 
 class AutoTuneConfig(BaseModel):
     enabled: bool = False
-    tune_every_n_cycles: int = 100     # ~50 min at 30s intervals
+    tune_every_n_cycles: int = 100     # ~50 min at 30s intervals (max fallback)
     openai_model: str = "gpt-4o"
+    secondary_model: str | None = None  # for multi-model consensus
     max_change_pct: float = 0.30       # max relative change per param per tune
     require_min_cycles: int = 200      # don't tune until enough data
     require_min_trades: int = 3        # don't tune until enough closed trades
+    # Adaptive triggers — tune early if any of these fire
+    trigger_on_drawdown_pct: float = 0.05       # trigger if drawdown exceeds this
+    trigger_on_consecutive_losses: int = 3      # trigger after N consecutive losses
+    trigger_on_regime_change: bool = True        # trigger when market regime flips
+    min_cycles_between_tunes: int = 30           # cooldown: never tune more often than this
+    # Auto-rollback
+    rollback_drop_pct: float = 0.05             # rollback if equity drops this much post-tune
+    rollback_eval_cycles: int = 50              # evaluate rollback after this many cycles
 
 
 # Hard bounds for every tunable parameter — AI cannot exceed these
@@ -157,6 +166,13 @@ TUNABLE_PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     "risk": {
         "max_position_pct": (0.03, 0.25),
         "max_concurrent_positions": (1, 5),
+        "regime_bear_btc_change_pct": (-0.10, -0.005),
+        "regime_bear_breadth_pct": (0.15, 0.55),
+    },
+    "scanner": {
+        "min_volume_24h_usd": (10_000, 500_000),
+        "min_turnover_24h_usd": (10_000, 1_000_000),
+        "max_candidates_to_enrich": (3, 20),
     },
 }
 

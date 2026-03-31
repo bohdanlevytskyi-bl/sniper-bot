@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sniper_bot.alerts import TelegramNotifier, format_alert
 from sniper_bot.config import AppConfig, get_optional_secret, get_required_secret, load_config, resolve_path
@@ -44,7 +44,7 @@ from sniper_bot.strategy import compute_price_changes, rank_candidates, score_ca
 LOGGER = get_logger(__name__)
 
 
-@dataclass(slots=True)
+@dataclass
 class Runtime:
     config: AppConfig
     config_path: Path
@@ -53,6 +53,10 @@ class Runtime:
     bybit: BybitClient
     notifier: TelegramNotifier | None
     cycle_count: int = 0
+    last_tune_cycle: int = 0          # cycle when last tune ran
+    last_regime_allowed: bool = True   # previous regime state for change detection
+    _tune_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _tune_thread: threading.Thread | None = field(default=None, repr=False)
 
     def close(self) -> None:
         self.bybit.close()
@@ -262,6 +266,10 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
 
             # Market regime gate: block entries in bear conditions
             regime_allowed, regime_reason = check_market_regime(config.risk, btc_change_1h, market_breadth)
+            # Track regime flips for adaptive tune triggers
+            if regime_allowed != runtime.last_regime_allowed:
+                LOGGER.info("regime_change", extra={"from": runtime.last_regime_allowed, "to": regime_allowed})
+                runtime.last_regime_allowed = regime_allowed
             if not regime_allowed:
                 cycle_entry_action = "blocked"
                 cycle_block_reason = regime_reason
@@ -341,6 +349,17 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
                 "avg_volume_ratio": round(avg_turnover / median_turnover, 4) if median_turnover > 0 else None,
                 "equity": equity,
                 "open_positions_count": len(open_pos),
+            },
+            config_snapshot={
+                "min_entry_score": config.strategy.min_entry_score,
+                "volume_weight": config.strategy.volume_weight,
+                "momentum_weight": config.strategy.momentum_weight,
+                "rs_weight": config.strategy.relative_strength_weight,
+                "trailing_stop_pct": config.position.trailing_stop_pct,
+                "hard_stop_pct": config.position.hard_stop_pct,
+                "take_profit_multiple": config.position.take_profit_multiple,
+                "max_position_pct": config.risk.max_position_pct,
+                "regime_gate_enabled": config.risk.regime_gate_enabled,
             },
         )
 
@@ -545,14 +564,72 @@ def _validate_run(config: AppConfig, mode: str, confirm_live: bool) -> None:
         raise RuntimeError("Demo mode requires exchange.environment: demo in config")
 
 
+def _should_tune_now(runtime: Runtime, current_equity: float) -> tuple[bool, str]:
+    """Check if an adaptive trigger fires, or if the fixed interval is reached."""
+    cfg = runtime.config.auto_tune
+    cycles_since_tune = runtime.cycle_count - runtime.last_tune_cycle
+
+    # Hard cooldown — never tune more often than min_cycles_between_tunes
+    if cycles_since_tune < cfg.min_cycles_between_tunes:
+        return False, ""
+
+    # Fixed interval fallback
+    if runtime.cycle_count % cfg.tune_every_n_cycles == 0:
+        return True, "scheduled_interval"
+
+    # Adaptive: drawdown trigger
+    with runtime.db.session() as session:
+        state = get_or_create_state(session, runtime.mode)
+        hwm = float(state.high_water_mark or current_equity)
+        consec_losses = int(state.consecutive_losses or 0)
+
+    if hwm > 0 and current_equity > 0:
+        drawdown = (hwm - current_equity) / hwm
+        if drawdown >= cfg.trigger_on_drawdown_pct:
+            return True, f"drawdown_{drawdown:.2%}"
+
+    # Adaptive: consecutive losses
+    if consec_losses >= cfg.trigger_on_consecutive_losses:
+        return True, f"consecutive_losses_{consec_losses}"
+
+    return False, ""
+
+
 def _maybe_auto_tune(runtime: Runtime) -> None:
-    """Run AI auto-tune if enabled and enough cycles have passed."""
+    """Run AI auto-tune if enabled and a trigger fires."""
     cfg = runtime.config.auto_tune
     if not cfg.enabled:
         return
     if runtime.cycle_count == 0:
         return
-    if runtime.cycle_count % cfg.tune_every_n_cycles != 0:
+
+    # Get current equity for rollback tracking
+    with runtime.db.session() as session:
+        state = get_or_create_state(session, runtime.mode)
+        current_equity = float(state.last_equity or state.usdt_balance or 0)
+
+    # Check auto-rollback every cycle (cheap DB read)
+    try:
+        from sniper_bot.ai_advisor import check_auto_rollback
+
+        rollback = check_auto_rollback(
+            runtime.db, runtime.mode, runtime.config, current_equity,
+            rollback_drop_pct=cfg.rollback_drop_pct,
+            rollback_eval_cycles=cfg.rollback_eval_cycles,
+        )
+        if rollback:
+            LOGGER.warning("auto_rollback_triggered", extra=rollback)
+            _notify(runtime, "AI Auto-Rollback", [
+                f"Equity dropped {rollback['drop_pct']:.1%} after tune at cycle {rollback['trigger_cycle']}",
+                f"Equity: {rollback['equity_start']:.2f} → {rollback['equity_now']:.2f}",
+                "Config restored to pre-tune snapshot.",
+            ])
+    except Exception:
+        LOGGER.exception("auto_rollback_check_error")
+
+    # Check if we should tune now (adaptive triggers + fixed interval)
+    should_tune, trigger_reason = _should_tune_now(runtime, current_equity)
+    if not should_tune:
         return
 
     api_key = get_optional_secret("OPENAI_API_KEY")
@@ -560,25 +637,41 @@ def _maybe_auto_tune(runtime: Runtime) -> None:
         LOGGER.warning("auto_tune_skipped_no_key")
         return
 
-    try:
-        from sniper_bot.ai_advisor import auto_tune_cycle
+    # Skip if a previous tune is still running in the background
+    if runtime._tune_thread is not None and runtime._tune_thread.is_alive():
+        LOGGER.debug("auto_tune_skipped_already_running")
+        return
 
-        LOGGER.info("auto_tune_starting", extra={"cycle": runtime.cycle_count})
-        result = auto_tune_cycle(runtime.db, runtime.mode, runtime.config, api_key, runtime.cycle_count)
-        LOGGER.info("auto_tune_complete", extra={"result": result})
+    cycle_at_trigger = runtime.cycle_count
+    runtime.last_tune_cycle = cycle_at_trigger
 
-        if result.get("status") == "applied":
-            applied = result.get("applied", {})
-            changes_summary = "; ".join(f"{k}: {v['old']}→{v['new']}" for k, v in applied.items())
-            _notify(runtime, "AI Auto-Tune Applied", [
-                f"Cycle: {runtime.cycle_count}",
-                f"Confidence: {result.get('confidence', '?')}",
-                f"Changes: {changes_summary}",
-            ])
-        elif result.get("status") == "skipped":
-            LOGGER.info("auto_tune_skipped", extra={"reason": result.get("reason")})
-    except Exception:
-        LOGGER.exception("auto_tune_error")
+    def _run_tune() -> None:
+        try:
+            from sniper_bot.ai_advisor import auto_tune_cycle
+
+            LOGGER.info("auto_tune_starting", extra={"cycle": cycle_at_trigger, "trigger": trigger_reason})
+            with runtime._tune_lock:
+                result = auto_tune_cycle(
+                    runtime.db, runtime.mode, runtime.config, api_key,
+                    cycle_at_trigger, current_equity=current_equity,
+                )
+            LOGGER.info("auto_tune_complete", extra={"result": result})
+
+            if result.get("status") == "applied":
+                applied = result.get("applied", {})
+                changes_summary = "; ".join(f"{k}: {v['old']}→{v['new']}" for k, v in applied.items())
+                _notify(runtime, "AI Auto-Tune Applied", [
+                    f"Cycle: {cycle_at_trigger} (trigger: {trigger_reason})",
+                    f"Confidence: {result.get('confidence', '?')}",
+                    f"Changes: {changes_summary}",
+                ])
+            elif result.get("status") == "skipped":
+                LOGGER.info("auto_tune_skipped", extra={"reason": result.get("reason")})
+        except Exception:
+            LOGGER.exception("auto_tune_error")
+
+    runtime._tune_thread = threading.Thread(target=_run_tune, daemon=True, name="ai-tune")
+    runtime._tune_thread.start()
 
 
 def _notify(runtime: Runtime, title: str, lines: list[str]) -> None:

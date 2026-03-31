@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    desc,
     select,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -174,6 +175,22 @@ class CycleLog(Base):
     avg_volume_ratio = Column(Float)      # avg turnover relative to median
     equity = Column(Float)
     open_positions_count = Column(Integer)
+    # Config snapshot: active params at this cycle (for AI correlation)
+    config_snapshot = Column(JSON)
+
+
+class PreTuneSnapshot(Base):
+    """Snapshot of config taken before each AI tune — enables rollback."""
+    __tablename__ = "pre_tune_snapshots"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String, nullable=False, index=True)
+    recorded_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    trigger_cycle = Column(Integer, nullable=False)
+    config_snapshot = Column(JSON, nullable=False)  # full strategy+position+risk dump
+    rolled_back = Column(Integer, nullable=False, default=0)  # 1 if this snapshot was restored
+    post_tune_cycles = Column(Integer, nullable=False, default=0)  # cycles elapsed since this tune
+    post_tune_equity_start = Column(Float)  # equity right after tune
+    post_tune_equity_latest = Column(Float)  # last known equity after tune
 
 
 class AITuneLog(Base):
@@ -391,6 +408,7 @@ def record_cycle_log(
     entry_symbol: str | None = None,
     block_reason: str | None = None,
     market_context: dict[str, Any] | None = None,
+    config_snapshot: dict[str, Any] | None = None,
 ) -> CycleLog:
     top_score = max((c["composite_score"] for c in top_candidates), default=0.0)
     ctx = market_context or {}
@@ -409,6 +427,7 @@ def record_cycle_log(
         avg_volume_ratio=ctx.get("avg_volume_ratio"),
         equity=ctx.get("equity"),
         open_positions_count=ctx.get("open_positions_count"),
+        config_snapshot=config_snapshot,
     )
     session.add(log)
     session.flush()
@@ -445,6 +464,34 @@ def record_ai_tune_log(
     session.add(log)
     session.flush()
     return log
+
+
+def record_pre_tune_snapshot(
+    session: Session,
+    mode: str,
+    trigger_cycle: int,
+    config_snapshot: dict[str, Any],
+    equity: float | None = None,
+) -> PreTuneSnapshot:
+    snap = PreTuneSnapshot(
+        mode=mode,
+        trigger_cycle=trigger_cycle,
+        config_snapshot=config_snapshot,
+        post_tune_equity_start=equity,
+        post_tune_equity_latest=equity,
+    )
+    session.add(snap)
+    session.flush()
+    return snap
+
+
+def get_latest_pre_tune_snapshot(session: Session, mode: str) -> PreTuneSnapshot | None:
+    return session.scalar(
+        select(PreTuneSnapshot)
+        .where(PreTuneSnapshot.mode == mode, PreTuneSnapshot.rolled_back == 0)
+        .order_by(desc(PreTuneSnapshot.recorded_at))
+        .limit(1)
+    )
 
 
 def upsert_pair(session: Session, symbol: str, info: dict[str, Any]) -> Pair:
