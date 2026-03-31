@@ -71,15 +71,21 @@ class ScannerConfig(BaseModel):
 class StrategyConfig(BaseModel):
     volume_spike_threshold: float = 3.0
     momentum_windows_minutes: list[int] = Field(default_factory=lambda: [5, 15, 60])
-    volume_weight: float = 0.4
-    momentum_weight: float = 0.4
-    relative_strength_weight: float = 0.2
+    volume_weight: float = 0.30
+    momentum_weight: float = 0.25
+    relative_strength_weight: float = 0.15
+    ta_weight: float = 0.15          # RSI + MACD + Bollinger
+    obi_weight: float = 0.10         # Order Book Imbalance
+    funding_weight: float = 0.05     # Funding rate signal
     min_entry_score: float = 0.6
     max_entries_per_cycle: int = 1
 
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> "StrategyConfig":
-        total = self.volume_weight + self.momentum_weight + self.relative_strength_weight
+        total = (
+            self.volume_weight + self.momentum_weight + self.relative_strength_weight
+            + self.ta_weight + self.obi_weight + self.funding_weight
+        )
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Strategy weights must sum to 1.0, got {total}")
         return self
@@ -106,6 +112,10 @@ class RiskConfig(BaseModel):
     cooldown_hours: int = 12
     initial_paper_cash: float = 1000.0
     min_score_for_full_size: float = 0.80  # score at which full max_position_pct is used
+    # Kelly Criterion sizing
+    use_kelly: bool = True
+    kelly_fraction: float = 0.25     # quarter-Kelly (conservative)
+    kelly_min_trades: int = 20       # need this many closed trades before Kelly kicks in
     # Market regime gate
     regime_gate_enabled: bool = True
     regime_bear_btc_change_pct: float = -0.03   # BTC 1h change below this → bear, block entries
@@ -151,9 +161,12 @@ class AutoTuneConfig(BaseModel):
 TUNABLE_PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     "strategy": {
         "min_entry_score": (0.05, 0.90),
-        "volume_weight": (0.1, 0.7),
-        "momentum_weight": (0.1, 0.7),
-        "relative_strength_weight": (0.05, 0.5),
+        "volume_weight": (0.05, 0.60),
+        "momentum_weight": (0.05, 0.60),
+        "relative_strength_weight": (0.05, 0.40),
+        "ta_weight": (0.0, 0.40),
+        "obi_weight": (0.0, 0.30),
+        "funding_weight": (0.0, 0.20),
     },
     "position": {
         "trailing_stop_pct": (0.03, 0.30),

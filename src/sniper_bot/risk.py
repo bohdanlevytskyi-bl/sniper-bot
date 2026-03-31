@@ -63,14 +63,53 @@ def check_portfolio_gates(
     return RiskCheck(True, "ok", drawdown_pct, daily_loss_pct)
 
 
-def position_size(config: RiskConfig, equity: float, price: float, available_cash: float, signal_score: float = 1.0) -> float:
-    """Calculate how much base asset to buy, scaled proportionally to signal strength."""
-    # Score ≥ min_score_for_full_size → 100% of max; score at 0 → 50% of max
+def compute_kelly_pct(
+    win_rate: float,
+    avg_win: float,
+    avg_loss: float,
+    fraction: float = 0.25,
+) -> float:
+    """Compute Kelly fraction for position sizing.
+
+    K% = W - [(1-W) / R]  where W = win rate, R = avg_win / avg_loss
+    Returns fraction of equity to risk (clamped to 0..fraction).
+    """
+    if avg_loss <= 0 or win_rate <= 0:
+        return 0.0
+    r = avg_win / avg_loss
+    kelly = win_rate - (1 - win_rate) / r
+    # Apply fractional Kelly and clamp
+    return max(0.0, min(fraction, kelly * fraction))
+
+
+def position_size(
+    config: RiskConfig,
+    equity: float,
+    price: float,
+    available_cash: float,
+    signal_score: float = 1.0,
+    kelly_pct: float | None = None,
+) -> float:
+    """Calculate how much base asset to buy.
+
+    Uses Kelly Criterion when available, falling back to score-proportional sizing.
+    """
+    if price <= 0 or equity <= 0:
+        return 0.0
+
+    # Score scaling: score ≥ min_score_for_full_size → 100% of max; score at 0 → 50%
     full_threshold = config.min_score_for_full_size
     size_scale = min(1.0, max(0.5, 0.5 + 0.5 * (signal_score / full_threshold if full_threshold > 0 else 1.0)))
-    max_usdt = min(config.max_position_pct * equity * size_scale, available_cash)
-    if price <= 0:
-        return 0.0
+
+    if config.use_kelly and kelly_pct is not None and kelly_pct > 0:
+        # Kelly-based: kelly_pct of equity, further scaled by signal score
+        kelly_usdt = kelly_pct * equity * size_scale
+        # Still respect max_position_pct as hard cap
+        max_usdt = min(kelly_usdt, config.max_position_pct * equity, available_cash)
+    else:
+        # Fallback: flat max_position_pct scaled by score
+        max_usdt = min(config.max_position_pct * equity * size_scale, available_cash)
+
     return max_usdt / price
 
 

@@ -475,7 +475,10 @@ def validate_proposed_changes(
             rejected[dotted_key] = {"reason": "no effective change after clamping"}
 
     # Special handling: if strategy weights were changed, re-normalize
-    weight_keys = {"strategy.volume_weight", "strategy.momentum_weight", "strategy.relative_strength_weight"}
+    weight_keys = {
+        "strategy.volume_weight", "strategy.momentum_weight", "strategy.relative_strength_weight",
+        "strategy.ta_weight", "strategy.obi_weight", "strategy.funding_weight",
+    }
     changed_weights = {k: v["new"] for k, v in applied.items() if k in weight_keys}
     if changed_weights:
         # Fill in unchanged weights with current values
@@ -483,6 +486,9 @@ def validate_proposed_changes(
             "strategy.volume_weight": config.strategy.volume_weight,
             "strategy.momentum_weight": config.strategy.momentum_weight,
             "strategy.relative_strength_weight": config.strategy.relative_strength_weight,
+            "strategy.ta_weight": config.strategy.ta_weight,
+            "strategy.obi_weight": config.strategy.obi_weight,
+            "strategy.funding_weight": config.strategy.funding_weight,
         }
         all_weights.update(changed_weights)
 

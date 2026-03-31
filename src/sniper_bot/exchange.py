@@ -155,6 +155,33 @@ class BybitClient:
             )
         return candles
 
+    def fetch_orderbook(self, symbol: str, depth: int = 25) -> dict[str, list[list[float]]]:
+        """Fetch order book depth. Returns {"bids": [[price, qty], ...], "asks": [...]}."""
+        result = self._public_get(
+            "/v5/market/orderbook",
+            {"category": "spot", "symbol": symbol, "limit": min(depth, 200)},
+        )
+        bids = [[float(p), float(q)] for p, q in result.get("b", [])]
+        asks = [[float(p), float(q)] for p, q in result.get("a", [])]
+        return {"bids": bids, "asks": asks}
+
+    def fetch_funding_rate(self, symbol: str) -> float | None:
+        """Fetch current funding rate for a linear perpetual. Returns None if not available."""
+        try:
+            perp_symbol = symbol  # e.g. BTCUSDT works for both spot and linear
+            result = self._public_get(
+                "/v5/market/tickers",
+                {"category": "linear", "symbol": perp_symbol},
+            )
+            items = result.get("list", [])
+            if items:
+                rate_str = items[0].get("fundingRate")
+                if rate_str:
+                    return float(rate_str)
+        except Exception:
+            pass
+        return None
+
     def get_ticker(self, symbol: str) -> TickerData:
         result = self._public_get("/v5/market/tickers", {"category": "spot", "symbol": symbol})
         items = result.get("list", [])

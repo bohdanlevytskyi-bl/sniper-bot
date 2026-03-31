@@ -12,7 +12,12 @@ def test_score_high_volume_spike():
 def test_score_zero_everything():
     config = StrategyConfig()
     result = score_candidate("XUSDT", 1.0, 0.0, {}, 0.0, config)
-    assert result.composite_score == 0.0
+    # TA/OBI/funding default to neutral (0.5) so score is not fully zero
+    assert result.volume_score == 0.0
+    assert result.momentum_score == 0.0
+    assert result.relative_strength_score == 0.0
+    # Composite reflects neutral TA+OBI+funding contributions
+    assert result.composite_score < 0.3
 
 
 def test_score_capped_at_one():

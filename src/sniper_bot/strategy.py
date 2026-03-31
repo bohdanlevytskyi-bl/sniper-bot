@@ -13,6 +13,9 @@ class ScoredToken:
     volume_score: float
     momentum_score: float
     relative_strength_score: float
+    ta_score: float
+    obi_score: float
+    funding_score: float
     volume_spike_ratio: float
     price: float
 
@@ -24,6 +27,9 @@ def score_candidate(
     price_changes: dict[str, float],
     btc_change_1h: float,
     config: StrategyConfig,
+    ta_composite: float = 0.5,
+    obi_value: float = 0.0,
+    funding_signal: float = 0.0,
 ) -> ScoredToken:
     """Compute composite score for a single candidate."""
 
@@ -44,10 +50,22 @@ def score_candidate(
     rs_raw = max(0.0, change_1h - btc_change_1h)
     relative_strength_score = min(rs_raw / 0.10, 1.0)  # cap at 10% outperformance
 
+    # TA composite: already 0-1 from indicators module
+    ta_score = max(0.0, min(1.0, ta_composite))
+
+    # OBI: -1 to +1 → normalize to 0-1
+    obi_score = max(0.0, min(1.0, (obi_value + 1.0) / 2.0))
+
+    # Funding signal: -1 to +1 → normalize to 0-1
+    funding_score = max(0.0, min(1.0, (funding_signal + 1.0) / 2.0))
+
     composite = (
         config.volume_weight * volume_score
         + config.momentum_weight * momentum_score
         + config.relative_strength_weight * relative_strength_score
+        + config.ta_weight * ta_score
+        + config.obi_weight * obi_score
+        + config.funding_weight * funding_score
     )
 
     return ScoredToken(
@@ -56,6 +74,9 @@ def score_candidate(
         volume_score=round(volume_score, 4),
         momentum_score=round(momentum_score, 4),
         relative_strength_score=round(relative_strength_score, 4),
+        ta_score=round(ta_score, 4),
+        obi_score=round(obi_score, 4),
+        funding_score=round(funding_score, 4),
         volume_spike_ratio=round(volume_spike_ratio, 4),
         price=price,
     )

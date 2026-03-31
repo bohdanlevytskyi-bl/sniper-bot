@@ -264,6 +264,13 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
 
             enriched: list = []
 
+            # Fetch BTC funding rate once for all candidates
+            btc_funding = 0.0
+            try:
+                btc_funding = runtime.bybit.fetch_funding_rate("BTCUSDT") or 0.0
+            except Exception:
+                pass
+
             # Market regime gate: block entries in bear conditions
             regime_allowed, regime_reason = check_market_regime(config.risk, btc_change_1h, market_breadth)
             # Track regime flips for adaptive tune triggers
@@ -275,7 +282,7 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
                 cycle_block_reason = regime_reason
                 LOGGER.info("regime_gate_blocked", extra={"reason": regime_reason, "btc_1h": btc_change_1h, "breadth": market_breadth})
             else:
-                enriched = _enrich_and_score(runtime, candidates[:config.scanner.max_candidates_to_enrich], btc_change_1h, open_pos)
+                enriched = _enrich_and_score(runtime, candidates[:config.scanner.max_candidates_to_enrich], btc_change_1h, open_pos, btc_funding)
 
             # Record all enriched candidates for analysis (before threshold filter)
             cycle_top_candidates = [
@@ -285,6 +292,9 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
                     "volume_score": round(s.volume_score, 4),
                     "momentum_score": round(s.momentum_score, 4),
                     "relative_strength": round(s.relative_strength_score, 4),
+                    "ta_score": round(s.ta_score, 4),
+                    "obi_score": round(s.obi_score, 4),
+                    "funding_score": round(s.funding_score, 4),
                     "volume_spike_ratio": round(s.volume_spike_ratio, 4),
                     "price": s.price,
                 }
@@ -298,12 +308,32 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
             else:
                 cycle_entry_action = "no_entry"
 
+            # Compute Kelly fraction from historical trades
+            kelly_pct: float | None = None
+            if config.risk.use_kelly:
+                from sniper_bot.risk import compute_kelly_pct
+                from sniper_bot.storage import Position as PositionModel
+                from sqlalchemy import desc as desc_
+                closed = list(session.scalars(
+                    select(PositionModel)
+                    .where(PositionModel.mode == mode, PositionModel.status == "closed")
+                    .order_by(desc_(PositionModel.exit_time))
+                    .limit(100)
+                ).all())
+                if len(closed) >= config.risk.kelly_min_trades:
+                    wins = [p for p in closed if (p.realized_pnl_pct or 0) > 0]
+                    losses = [p for p in closed if (p.realized_pnl_pct or 0) <= 0]
+                    win_rate = len(wins) / len(closed) if closed else 0
+                    avg_win = sum(abs(p.realized_pnl_pct or 0) for p in wins) / len(wins) if wins else 0
+                    avg_loss = sum(abs(p.realized_pnl_pct or 0) for p in losses) / len(losses) if losses else 0.01
+                    kelly_pct = compute_kelly_pct(win_rate, avg_win, avg_loss, config.risk.kelly_fraction)
+
             for scored in ranked[:config.strategy.max_entries_per_cycle]:
                 # Skip if already holding
                 if get_open_position_for_symbol(session, mode, scored.symbol):
                     continue
 
-                qty = position_size(config.risk, equity, scored.price, state.usdt_balance, scored.composite_score)
+                qty = position_size(config.risk, equity, scored.price, state.usdt_balance, scored.composite_score, kelly_pct)
                 if qty <= 0:
                     continue
 
@@ -392,7 +422,9 @@ def scan_once(runtime: Runtime) -> list[dict[str, Any]]:
     except Exception:
         pass
 
-    scored = _enrich_and_score(runtime, candidates[:runtime.config.scanner.max_candidates_to_enrich], btc_change_1h, [])
+    btc_funding = runtime.bybit.fetch_funding_rate("BTCUSDT") or 0.0
+
+    scored = _enrich_and_score(runtime, candidates[:runtime.config.scanner.max_candidates_to_enrich], btc_change_1h, [], btc_funding)
     ranked = rank_candidates(scored, runtime.config.strategy)
 
     return [
@@ -402,6 +434,9 @@ def scan_once(runtime: Runtime) -> list[dict[str, Any]]:
             "volume_score": s.volume_score,
             "momentum_score": s.momentum_score,
             "rs_score": s.relative_strength_score,
+            "ta_score": s.ta_score,
+            "obi_score": s.obi_score,
+            "funding_score": s.funding_score,
             "spike_ratio": s.volume_spike_ratio,
             "price": s.price,
         }
@@ -509,8 +544,16 @@ def healthcheck(runtime: Runtime) -> dict[str, Any]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions):
-    """Fetch klines for candidates and compute scores."""
+def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions, btc_funding: float = 0.0):
+    """Fetch klines, order book, and TA indicators for candidates and compute scores."""
+    from sniper_bot.indicators import (
+        compute_bollinger_bands,
+        compute_funding_rate_signal,
+        compute_macd,
+        compute_obi_score,
+        compute_rsi,
+        compute_ta_composite,
+    )
     from sniper_bot.strategy import ScoredToken, score_candidate, compute_price_changes
 
     held_symbols = {p.symbol for p in open_positions}
@@ -521,7 +564,7 @@ def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions):
             continue
         try:
             candles_5m = runtime.bybit.fetch_klines(c.symbol, 5, limit=48)
-            candles_1h = runtime.bybit.fetch_klines(c.symbol, 60, limit=5)
+            candles_1h = runtime.bybit.fetch_klines(c.symbol, 60, limit=30)
         except Exception:
             LOGGER.debug("kline_fetch_failed", extra={"symbol": c.symbol})
             continue
@@ -540,8 +583,36 @@ def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions):
             avg_vol_per_bar = c.volume_24h / bars_per_day_5m if c.volume_24h > 0 else 0
             spike_ratio = compute_volume_spike(candles_5m[-3:] if len(candles_5m) >= 3 else candles_5m, avg_vol_per_bar)
 
+        # --- TA indicators (from 1h candles, need ~26+ for MACD) ---
+        rsi = compute_rsi(candles_1h, period=14)
+        macd = compute_macd(candles_1h, fast=12, slow=26, signal=9)
+        bbands = compute_bollinger_bands(candles_1h, period=20, std_dev=2.0)
+        ta_composite = compute_ta_composite(rsi, macd, bbands)
+
+        # --- Order Book Imbalance ---
+        obi_value = 0.0
+        try:
+            ob = runtime.bybit.fetch_orderbook(c.symbol, depth=25)
+            obi_value = compute_obi_score(ob["bids"], ob["asks"])
+        except Exception:
+            LOGGER.debug("orderbook_fetch_failed", extra={"symbol": c.symbol})
+
+        # --- Funding Rate Signal (use BTC funding as proxy for all pairs) ---
+        funding_signal = compute_funding_rate_signal(btc_funding) if btc_funding else 0.0
+        # If the pair has its own perp, try to get its specific funding
+        try:
+            pair_funding = runtime.bybit.fetch_funding_rate(c.symbol)
+            if pair_funding is not None:
+                funding_signal = compute_funding_rate_signal(pair_funding)
+        except Exception:
+            pass
+
         s = score_candidate(
-            c.symbol, c.last_price, spike_ratio, price_changes, btc_change_1h, runtime.config.strategy
+            c.symbol, c.last_price, spike_ratio, price_changes, btc_change_1h,
+            runtime.config.strategy,
+            ta_composite=ta_composite,
+            obi_value=obi_value,
+            funding_signal=funding_signal,
         )
         scored.append(s)
 
