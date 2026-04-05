@@ -27,6 +27,7 @@ from sniper_bot.risk import (
 from sniper_bot.scanner import TokenCandidate, compute_volume_spike, scan_market
 from sniper_bot.storage import (
     Database,
+    PendingTwapOrder,
     close_position,
     get_open_position_for_symbol,
     get_open_positions,
@@ -235,6 +236,9 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
             session.commit()
             return {"status": "halted", "drawdown_pct": drawdown_pct}
 
+        # --- Phase 4b: Execute pending TWAP chunks ---
+        _process_twap_chunks(runtime, session, state, broker, mode, tickers)
+
         # --- Phase 5: Risk gate check for new entries ---
         open_pos = get_open_positions(session, mode)  # refresh after exits
         risk_check = check_portfolio_gates(state, open_pos, config.risk, now)
@@ -345,24 +349,91 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
                 if inst and qty * scored.price < inst.min_order_amount:
                     continue
 
-                fill = broker.execute_buy(state, scored.symbol, qty, scored.price)
-                usdt_invested = fill.cost + fill.fee
-                stop_price = fill.avg_price * (1 - config.position.trailing_stop_pct)
+                # Correlation check: skip if too correlated with existing positions
+                if open_pos and config.risk.max_correlated_positions > 0:
+                    correlated_count = _count_correlated_positions(
+                        runtime, scored.symbol, open_pos,
+                        config.risk.correlation_lookback_bars,
+                        config.risk.correlation_threshold,
+                    )
+                    if correlated_count >= config.risk.max_correlated_positions:
+                        LOGGER.info("entry_skipped_correlation", extra={
+                            "symbol": scored.symbol, "correlated": correlated_count,
+                        })
+                        continue
 
-                record_order(session, mode, scored.symbol, "buy", fill.quantity, scored.price, fill.avg_price, fill.fee, fill.cost, "filled", fill.order_id)
-                record_signal(session, mode, scored.symbol, "enter", "momentum_score", scored.composite_score, scored.volume_spike_ratio, scored.momentum_score, scored.relative_strength_score, scored.price)
-                open_position(session, mode, scored.symbol, fill.avg_price, fill.quantity, usdt_invested, stop_price)
+                order_usdt = qty * scored.price
+                exec_cfg = config.execution
 
-                entries_this_cycle.append({"symbol": scored.symbol, "score": scored.composite_score, "qty": fill.quantity, "price": fill.avg_price})
+                # Compute ATR for dynamic stops
+                entry_atr: float | None = None
+                if config.position.use_atr_stops:
+                    from sniper_bot.indicators import compute_atr as calc_atr
+                    try:
+                        atr_candles = runtime.bybit.fetch_klines(scored.symbol, 60, limit=20)
+                        entry_atr = calc_atr(atr_candles, period=14)
+                    except Exception:
+                        pass
+
+                # Compute initial stop price (ATR-based or fixed)
+                def _initial_stop(fill_price: float) -> float:
+                    if config.position.use_atr_stops and entry_atr and entry_atr > 0 and fill_price > 0:
+                        atr_pct = (entry_atr * config.position.atr_stop_multiplier) / fill_price
+                        stop_pct = max(config.position.atr_min_stop_pct, min(config.position.atr_max_stop_pct, atr_pct))
+                    else:
+                        stop_pct = config.position.trailing_stop_pct
+                    return fill_price * (1 - stop_pct)
+
+                # TWAP: split large orders into chunks
+                if exec_cfg.twap_enabled and order_usdt > exec_cfg.twap_threshold_usdt and exec_cfg.twap_chunks > 1:
+                    chunk_qty = qty / exec_cfg.twap_chunks
+                    fill = broker.execute_buy(state, scored.symbol, chunk_qty, scored.price)
+                    usdt_invested = fill.cost + fill.fee
+                    stop_price = _initial_stop(fill.avg_price)
+
+                    record_order(session, mode, scored.symbol, "buy", fill.quantity, scored.price, fill.avg_price, fill.fee, fill.cost, "filled", fill.order_id)
+                    record_signal(session, mode, scored.symbol, "enter", "momentum_score", scored.composite_score, scored.volume_spike_ratio, scored.momentum_score, scored.relative_strength_score, scored.price)
+                    open_position(session, mode, scored.symbol, fill.avg_price, fill.quantity, usdt_invested, stop_price, atr_at_entry=entry_atr)
+
+                    twap = PendingTwapOrder(
+                        mode=mode, symbol=scored.symbol, side="buy",
+                        total_quantity=qty, executed_quantity=fill.quantity,
+                        remaining_chunks=exec_cfg.twap_chunks - 1,
+                        chunk_quantity=chunk_qty,
+                        next_execute_cycle=runtime.cycle_count + exec_cfg.twap_chunk_interval_cycles,
+                        chunk_interval_cycles=exec_cfg.twap_chunk_interval_cycles,
+                        original_price=scored.price,
+                        composite_score=scored.composite_score,
+                    )
+                    session.add(twap)
+
+                    entries_this_cycle.append({"symbol": scored.symbol, "score": scored.composite_score, "qty": fill.quantity, "price": fill.avg_price, "twap": f"1/{exec_cfg.twap_chunks}"})
+                    _notify(runtime, "TWAP Trade Started", [
+                        f"Symbol: {scored.symbol}",
+                        f"Score: {scored.composite_score:.2f}",
+                        f"Chunk 1/{exec_cfg.twap_chunks}: {fill.quantity:.6f} @ {fill.avg_price:.6f}",
+                        f"Total planned: {qty:.6f}",
+                    ])
+                else:
+                    fill = broker.execute_buy(state, scored.symbol, qty, scored.price)
+                    usdt_invested = fill.cost + fill.fee
+                    stop_price = _initial_stop(fill.avg_price)
+
+                    record_order(session, mode, scored.symbol, "buy", fill.quantity, scored.price, fill.avg_price, fill.fee, fill.cost, "filled", fill.order_id)
+                    record_signal(session, mode, scored.symbol, "enter", "momentum_score", scored.composite_score, scored.volume_spike_ratio, scored.momentum_score, scored.relative_strength_score, scored.price)
+                    open_position(session, mode, scored.symbol, fill.avg_price, fill.quantity, usdt_invested, stop_price, atr_at_entry=entry_atr)
+
+                    entries_this_cycle.append({"symbol": scored.symbol, "score": scored.composite_score, "qty": fill.quantity, "price": fill.avg_price})
+                    _notify(runtime, "Trade Opened", [
+                        f"Symbol: {scored.symbol}",
+                        f"Score: {scored.composite_score:.2f}",
+                        f"Price: {fill.avg_price:.6f}",
+                        f"Qty: {fill.quantity:.6f}",
+                        f"Stop: {stop_price:.6f}",
+                    ])
+
                 cycle_entry_action = "entered"
                 cycle_entry_symbol = scored.symbol
-                _notify(runtime, "Trade Opened", [
-                    f"Symbol: {scored.symbol}",
-                    f"Score: {scored.composite_score:.2f}",
-                    f"Price: {fill.avg_price:.6f}",
-                    f"Qty: {fill.quantity:.6f}",
-                    f"Stop: {stop_price:.6f}",
-                ])
 
         record_cycle_log(
             session, mode,
@@ -617,6 +688,87 @@ def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions, btc_fu
         scored.append(s)
 
     return scored
+
+
+def _count_correlated_positions(runtime, candidate_symbol, open_positions, lookback_bars, threshold):
+    """Count how many open positions are highly correlated with the candidate."""
+    from sniper_bot.indicators import compute_pearson_correlation, price_returns
+
+    try:
+        candidate_candles = runtime.bybit.fetch_klines(candidate_symbol, 60, limit=lookback_bars + 1)
+        candidate_rets = price_returns(candidate_candles)
+    except Exception:
+        return 0
+
+    if len(candidate_rets) < 5:
+        return 0
+
+    correlated = 0
+    for pos in open_positions:
+        try:
+            pos_candles = runtime.bybit.fetch_klines(pos.symbol, 60, limit=lookback_bars + 1)
+            pos_rets = price_returns(pos_candles)
+            corr = compute_pearson_correlation(candidate_rets, pos_rets)
+            if corr is not None and corr >= threshold:
+                correlated += 1
+        except Exception:
+            continue
+    return correlated
+
+
+def _process_twap_chunks(runtime, session, state, broker, mode, tickers):
+    """Execute any pending TWAP order chunks that are due this cycle."""
+    from sqlalchemy import select as sel_
+
+    pending = list(session.scalars(
+        sel_(PendingTwapOrder).where(
+            PendingTwapOrder.mode == mode,
+            PendingTwapOrder.status == "active",
+            PendingTwapOrder.next_execute_cycle <= runtime.cycle_count,
+        )
+    ).all())
+
+    for twap in pending:
+        ticker = _find_ticker(tickers, twap.symbol)
+        if ticker is None:
+            continue
+
+        # Cancel if position was already closed
+        pos = get_open_position_for_symbol(session, mode, twap.symbol)
+        if pos is None:
+            twap.status = "cancelled"
+            LOGGER.info("twap_cancelled_no_position", extra={"symbol": twap.symbol})
+            continue
+
+        # Cancel if price moved too far from original (>10% worse)
+        if ticker.last_price > twap.original_price * 1.10:
+            twap.status = "cancelled"
+            LOGGER.info("twap_cancelled_price_moved", extra={"symbol": twap.symbol, "original": twap.original_price, "current": ticker.last_price})
+            continue
+
+        chunk_qty = twap.chunk_quantity
+        fill = broker.execute_buy(state, twap.symbol, chunk_qty, ticker.last_price)
+
+        # Update position: add to invested amount and quantity
+        pos.quantity += fill.quantity
+        pos.usdt_invested += fill.cost + fill.fee
+        # Recalculate average entry price
+        pos.entry_price = pos.usdt_invested / pos.quantity if pos.quantity > 0 else pos.entry_price
+
+        record_order(session, mode, twap.symbol, "buy", fill.quantity, ticker.last_price, fill.avg_price, fill.fee, fill.cost, "filled", fill.order_id)
+
+        twap.executed_quantity += fill.quantity
+        twap.remaining_chunks -= 1
+
+        if twap.remaining_chunks <= 0:
+            twap.status = "completed"
+            LOGGER.info("twap_completed", extra={"symbol": twap.symbol, "total_qty": twap.executed_quantity})
+        else:
+            twap.next_execute_cycle = runtime.cycle_count + twap.chunk_interval_cycles
+            LOGGER.info("twap_chunk_executed", extra={
+                "symbol": twap.symbol, "chunk_qty": fill.quantity,
+                "remaining": twap.remaining_chunks,
+            })
 
 
 def _find_ticker(tickers, symbol):

@@ -100,6 +100,12 @@ class PositionConfig(BaseModel):
     max_hold_hours: int = 72
     trail_tighten_gain_pct: float = 0.10   # tighten trail once unrealized gain reaches this
     trail_tightened_stop_pct: float = 0.07  # tighter trail (from peak) after gain threshold
+    # ATR-based dynamic stops
+    use_atr_stops: bool = True
+    atr_stop_multiplier: float = 2.5       # stop = entry - ATR * multiplier
+    atr_trail_multiplier: float = 2.0      # trailing stop = peak - ATR * multiplier
+    atr_min_stop_pct: float = 0.03         # floor: never tighter than 3%
+    atr_max_stop_pct: float = 0.30         # ceiling: never wider than 30%
 
 
 class RiskConfig(BaseModel):
@@ -112,6 +118,10 @@ class RiskConfig(BaseModel):
     cooldown_hours: int = 12
     initial_paper_cash: float = 1000.0
     min_score_for_full_size: float = 0.80  # score at which full max_position_pct is used
+    # Correlation exposure limits
+    max_correlated_positions: int = 2   # max positions with correlation > threshold
+    correlation_threshold: float = 0.75  # Pearson r above this = "correlated"
+    correlation_lookback_bars: int = 24  # 1h bars to compute correlation
     # Kelly Criterion sizing
     use_kelly: bool = True
     kelly_fraction: float = 0.25     # quarter-Kelly (conservative)
@@ -126,6 +136,11 @@ class ExecutionConfig(BaseModel):
     slippage_bps: int = 10
     fee_rate: float = 0.001
     poll_interval_seconds: int = 30
+    # TWAP: split large orders into chunks across cycles
+    twap_enabled: bool = True
+    twap_threshold_usdt: float = 50.0   # orders above this get split
+    twap_chunks: int = 3                # number of chunks to split into
+    twap_chunk_interval_cycles: int = 2 # cycles between chunks
 
 
 class AlertsConfig(BaseModel):

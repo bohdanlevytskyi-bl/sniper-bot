@@ -436,6 +436,59 @@ def export(
 
 
 @app.command()
+def backtest(
+    config: Path = typer.Option("config/example.yaml", "--config", "-c", help="Path to config YAML"),
+    hours: int = typer.Option(168, "--hours", "-H", help="Lookback period in hours (default: 7 days)"),
+    symbols: str = typer.Option(
+        "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,ADAUSDT",
+        "--symbols", "-s", help="Comma-separated symbols to backtest",
+    ),
+) -> None:
+    """Run a backtest over historical data using current config."""
+    from sniper_bot.app import create_runtime
+    from sniper_bot.backtest import run_backtest
+
+    runtime = create_runtime(config)
+    try:
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        typer.echo(f"Backtesting {len(symbol_list)} symbols over {hours}h...")
+
+        result = run_backtest(runtime.bybit, runtime.config, symbol_list, lookback_hours=hours)
+
+        typer.echo(f"\n{'='*60}")
+        typer.echo(result.summary())
+        typer.echo(f"{'='*60}")
+
+        typer.echo(f"\nEquity: {result.initial_equity:.2f} → {result.final_equity:.2f}")
+        typer.echo(f"Trades: {result.wins}W / {result.losses}L")
+
+        if result.trades:
+            typer.echo(f"\nTrade details:")
+            typer.echo(f"  {'Symbol':<12} {'PnL':>8} {'PnL%':>7} {'Exit':>15} {'Hold':>6} {'Score':>6}")
+            typer.echo(f"  {'-'*58}")
+            for t in result.trades[:30]:
+                typer.echo(
+                    f"  {t.symbol:<12} {t.pnl:>+8.2f} {t.pnl_pct:>+6.1%} "
+                    f"{t.exit_reason:>15} {t.hold_hours:>5.1f}h {t.entry_score:>6.3f}"
+                )
+
+        # Exit analysis
+        if result.trades:
+            exit_reasons: dict[str, list[float]] = {}
+            for t in result.trades:
+                exit_reasons.setdefault(t.exit_reason, []).append(t.pnl)
+            typer.echo(f"\nExit analysis:")
+            for reason, pnls in sorted(exit_reasons.items(), key=lambda x: sum(x[1]), reverse=True):
+                typer.echo(
+                    f"  {reason:<20} {len(pnls):>3} trades  "
+                    f"PnL: {sum(pnls):>+8.2f}  "
+                    f"Avg: {sum(pnls)/len(pnls):>+6.2f}"
+                )
+    finally:
+        runtime.close()
+
+
+@app.command()
 def version() -> None:
     """Show version."""
     from sniper_bot import __version__

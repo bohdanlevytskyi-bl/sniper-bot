@@ -189,6 +189,55 @@ def compute_ta_composite(
     return sum(signals) / len(signals)
 
 
+def compute_pearson_correlation(x: list[float], y: list[float]) -> float | None:
+    """Compute Pearson correlation coefficient between two price return series.
+
+    Returns -1.0 to +1.0, or None if insufficient data.
+    """
+    n = min(len(x), len(y))
+    if n < 5:
+        return None
+    x, y = x[-n:], y[-n:]
+
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+
+    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+    var_x = sum((xi - mean_x) ** 2 for xi in x)
+    var_y = sum((yi - mean_y) ** 2 for yi in y)
+
+    denom = (var_x * var_y) ** 0.5
+    if denom == 0:
+        return None
+    return cov / denom
+
+
+def price_returns(candles: list[dict[str, Any]]) -> list[float]:
+    """Compute percentage returns from candle closes."""
+    if len(candles) < 2:
+        return []
+    closes = [c["close"] for c in candles]
+    return [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1] > 0]
+
+
+def compute_atr(candles: list[dict[str, Any]], period: int = 14) -> float | None:
+    """Compute Average True Range from candles. Returns None if insufficient data."""
+    if len(candles) < period + 1:
+        return None
+
+    true_ranges: list[float] = []
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
+        return None
+    return sum(true_ranges[-period:]) / period
+
+
 # ---------------------------------------------------------------------------
 # Internal EMA helpers
 # ---------------------------------------------------------------------------

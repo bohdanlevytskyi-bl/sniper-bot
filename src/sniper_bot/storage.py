@@ -110,6 +110,7 @@ class Position(Base):
     realized_pnl = Column(Float)
     realized_pnl_pct = Column(Float)
     exit_reason = Column(String)
+    atr_at_entry = Column(Float)      # ATR value at entry for dynamic stops
     notes = Column(JSON)
 
 
@@ -177,6 +178,25 @@ class CycleLog(Base):
     open_positions_count = Column(Integer)
     # Config snapshot: active params at this cycle (for AI correlation)
     config_snapshot = Column(JSON)
+
+
+class PendingTwapOrder(Base):
+    """Tracks TWAP order chunks that need to be executed in future cycles."""
+    __tablename__ = "pending_twap_orders"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String, nullable=False, index=True)
+    symbol = Column(String, nullable=False)
+    side = Column(String, nullable=False)  # buy | sell
+    total_quantity = Column(Float, nullable=False)
+    executed_quantity = Column(Float, nullable=False, default=0.0)
+    remaining_chunks = Column(Integer, nullable=False)
+    chunk_quantity = Column(Float, nullable=False)
+    next_execute_cycle = Column(Integer, nullable=False)
+    chunk_interval_cycles = Column(Integer, nullable=False, default=2)
+    original_price = Column(Float, nullable=False)  # price at signal time
+    composite_score = Column(Float, nullable=False, default=0.0)
+    status = Column(String, nullable=False, default="active")  # active | completed | cancelled
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class PreTuneSnapshot(Base):
@@ -324,6 +344,7 @@ def open_position(
     quantity: float,
     usdt_invested: float,
     stop_price: float,
+    atr_at_entry: float | None = None,
 ) -> Position:
     pos = Position(
         mode=mode,
@@ -333,6 +354,7 @@ def open_position(
         usdt_invested=usdt_invested,
         max_price=entry_price,
         stop_price=stop_price,
+        atr_at_entry=atr_at_entry,
     )
     session.add(pos)
     session.flush()
