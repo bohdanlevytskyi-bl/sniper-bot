@@ -489,6 +489,21 @@ def backtest(
 
 
 @app.command()
+def dashboard(
+    config: Path = typer.Option("config/example.yaml", "--config", "-c", help="Path to config YAML"),
+    mode: str = typer.Option("paper", "--mode", "-m", help="Mode: paper, demo, live"),
+    port: int = typer.Option(8080, "--port", "-p", help="Dashboard port"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Dashboard host"),
+) -> None:
+    """Launch the web dashboard for monitoring."""
+    from sniper_bot.dashboard import create_dashboard_app
+
+    flask_app = create_dashboard_app(config, mode=mode)
+    typer.echo(f"Dashboard running at http://{host}:{port}")
+    flask_app.run(host=host, port=port, debug=False)
+
+
+@app.command()
 def version() -> None:
     """Show version."""
     from sniper_bot import __version__

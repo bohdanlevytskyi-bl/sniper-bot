@@ -238,6 +238,152 @@ def compute_atr(candles: list[dict[str, Any]], period: int = 14) -> float | None
     return sum(true_ranges[-period:]) / period
 
 
+def detect_whale_trades(
+    trades: list[dict[str, Any]], std_multiplier: float = 3.0,
+) -> dict[str, Any]:
+    """Detect abnormally large trades (whale activity).
+
+    trades: list of {price, qty, side, value} from recent public trades.
+    Returns dict with whale_score (-1 to +1), whale_buy_volume, whale_sell_volume, whale_count.
+    Positive score = net whale buying. Negative = net whale selling.
+    """
+    if len(trades) < 10:
+        return {"whale_score": 0.0, "whale_buy_volume": 0.0, "whale_sell_volume": 0.0, "whale_count": 0}
+
+    values = [t.get("value", 0.0) for t in trades]
+    mean_val = sum(values) / len(values)
+    variance = sum((v - mean_val) ** 2 for v in values) / len(values)
+    std_val = variance ** 0.5
+
+    if std_val == 0:
+        return {"whale_score": 0.0, "whale_buy_volume": 0.0, "whale_sell_volume": 0.0, "whale_count": 0}
+    threshold = mean_val + std_multiplier * std_val
+    if threshold <= 0:
+        return {"whale_score": 0.0, "whale_buy_volume": 0.0, "whale_sell_volume": 0.0, "whale_count": 0}
+
+    whale_buy = 0.0
+    whale_sell = 0.0
+    whale_count = 0
+
+    for t in trades:
+        val = t.get("value", 0.0)
+        if val >= threshold:
+            whale_count += 1
+            if t.get("side") == "buy":
+                whale_buy += val
+            else:
+                whale_sell += val
+
+    total_whale = whale_buy + whale_sell
+    if total_whale == 0:
+        return {"whale_score": 0.0, "whale_buy_volume": 0.0, "whale_sell_volume": 0.0, "whale_count": whale_count}
+
+    # Score: net whale buying pressure, -1 to +1
+    score = (whale_buy - whale_sell) / total_whale
+    return {
+        "whale_score": round(score, 4),
+        "whale_buy_volume": round(whale_buy, 2),
+        "whale_sell_volume": round(whale_sell, 2),
+        "whale_count": whale_count,
+    }
+
+
+def compute_vwap(candles: list[dict[str, Any]], period: int | None = None) -> dict[str, float] | None:
+    """Compute VWAP (Volume-Weighted Average Price) from candle data.
+
+    Returns {vwap, deviation_pct} where deviation_pct is how far current price is from VWAP.
+    Positive deviation = price above VWAP, negative = below.
+    """
+    if len(candles) < 5:
+        return None
+
+    subset = candles[-period:] if period and period < len(candles) else candles
+
+    cum_vol_price = 0.0
+    cum_vol = 0.0
+    for c in subset:
+        typical_price = (c["high"] + c["low"] + c["close"]) / 3.0
+        vol = c.get("volume", 0.0)
+        cum_vol_price += typical_price * vol
+        cum_vol += vol
+
+    if cum_vol == 0:
+        return None
+
+    vwap = cum_vol_price / cum_vol
+    current = candles[-1]["close"]
+    deviation_pct = (current - vwap) / vwap if vwap > 0 else 0.0
+
+    return {
+        "vwap": round(vwap, 8),
+        "deviation_pct": round(deviation_pct, 6),
+    }
+
+
+def compute_multi_timeframe_score(
+    tf_signals: dict[str, float],
+) -> float:
+    """Combine signals across multiple timeframes into a confluence score.
+
+    tf_signals: dict of timeframe_name → score (0-1), e.g. {"5m": 0.7, "1h": 0.6, "4h": 0.8}
+    Weights: shorter timeframes weighted less (noise), longer timeframes weighted more (trend).
+    Returns 0-1 confluence score.
+    """
+    if not tf_signals:
+        return 0.5
+
+    # Weight map: longer TFs get more weight
+    weight_map = {"5m": 0.10, "15m": 0.15, "1h": 0.30, "4h": 0.45}
+    total_weight = 0.0
+    weighted_sum = 0.0
+
+    for tf, score in tf_signals.items():
+        w = weight_map.get(tf, 0.25)
+        weighted_sum += w * score
+        total_weight += w
+
+    if total_weight == 0:
+        return 0.5
+    return round(weighted_sum / total_weight, 4)
+
+
+def compute_spread_signal(bid: float, ask: float, price: float) -> float:
+    """Compute bid-ask spread as a signal. Tight spread = liquid = good.
+
+    Returns 0.0 (very wide spread, illiquid) to 1.0 (very tight spread, liquid).
+    """
+    if price <= 0 or ask <= 0 or bid <= 0:
+        return 0.5
+    spread_pct = (ask - bid) / price
+    # Map: 0% spread → 1.0, 0.5% spread → 0.5, >1% → 0.1
+    if spread_pct <= 0:
+        return 1.0
+    if spread_pct >= 0.01:
+        return 0.1
+    return round(max(0.1, 1.0 - spread_pct * 100), 4)
+
+
+def compute_trade_flow_toxicity(trades: list[dict[str, Any]]) -> float:
+    """Estimate trade flow toxicity using buy/sell volume imbalance over recent trades.
+
+    High toxicity = aggressive directional flow (informed traders).
+    Returns 0.0 (balanced) to 1.0 (highly toxic / directional).
+    """
+    if len(trades) < 10:
+        return 0.0
+
+    buy_vol = sum(t.get("value", 0.0) for t in trades if t.get("side") == "buy")
+    sell_vol = sum(t.get("value", 0.0) for t in trades if t.get("side") == "sell")
+    total = buy_vol + sell_vol
+
+    if total == 0:
+        return 0.0
+
+    # Toxicity = absolute imbalance ratio
+    imbalance = abs(buy_vol - sell_vol) / total
+    return round(imbalance, 4)
+
+
 # ---------------------------------------------------------------------------
 # Internal EMA helpers
 # ---------------------------------------------------------------------------

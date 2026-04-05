@@ -16,6 +16,10 @@ class ScoredToken:
     ta_score: float
     obi_score: float
     funding_score: float
+    whale_score: float
+    vwap_score: float
+    mtf_score: float
+    microstructure_score: float
     volume_spike_ratio: float
     price: float
 
@@ -30,6 +34,10 @@ def score_candidate(
     ta_composite: float = 0.5,
     obi_value: float = 0.0,
     funding_signal: float = 0.0,
+    whale_signal: float = 0.0,
+    vwap_deviation: float = 0.0,
+    mtf_confluence: float = 0.5,
+    microstructure: float = 0.5,
 ) -> ScoredToken:
     """Compute composite score for a single candidate."""
 
@@ -59,6 +67,19 @@ def score_candidate(
     # Funding signal: -1 to +1 → normalize to 0-1
     funding_score = max(0.0, min(1.0, (funding_signal + 1.0) / 2.0))
 
+    # Whale signal: -1 to +1 → normalize to 0-1 (positive = net whale buying)
+    whale_score = max(0.0, min(1.0, (whale_signal + 1.0) / 2.0))
+
+    # VWAP deviation: negative deviation (below VWAP) = bullish for mean-reversion
+    # Map: -5% → 0.9, 0% → 0.5, +5% → 0.1
+    vwap_score = max(0.0, min(1.0, 0.5 - vwap_deviation * 10.0))
+
+    # Multi-timeframe confluence: already 0-1
+    mtf_score = max(0.0, min(1.0, mtf_confluence))
+
+    # Microstructure: already 0-1
+    micro_score = max(0.0, min(1.0, microstructure))
+
     composite = (
         config.volume_weight * volume_score
         + config.momentum_weight * momentum_score
@@ -66,6 +87,10 @@ def score_candidate(
         + config.ta_weight * ta_score
         + config.obi_weight * obi_score
         + config.funding_weight * funding_score
+        + config.whale_weight * whale_score
+        + config.vwap_weight * vwap_score
+        + config.mtf_weight * mtf_score
+        + config.microstructure_weight * micro_score
     )
 
     return ScoredToken(
@@ -77,6 +102,10 @@ def score_candidate(
         ta_score=round(ta_score, 4),
         obi_score=round(obi_score, 4),
         funding_score=round(funding_score, 4),
+        whale_score=round(whale_score, 4),
+        vwap_score=round(vwap_score, 4),
+        mtf_score=round(mtf_score, 4),
+        microstructure_score=round(micro_score, 4),
         volume_spike_ratio=round(volume_spike_ratio, 4),
         price=price,
     )

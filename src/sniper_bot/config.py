@@ -71,12 +71,16 @@ class ScannerConfig(BaseModel):
 class StrategyConfig(BaseModel):
     volume_spike_threshold: float = 3.0
     momentum_windows_minutes: list[int] = Field(default_factory=lambda: [5, 15, 60])
-    volume_weight: float = 0.30
-    momentum_weight: float = 0.25
-    relative_strength_weight: float = 0.15
-    ta_weight: float = 0.15          # RSI + MACD + Bollinger
-    obi_weight: float = 0.10         # Order Book Imbalance
+    volume_weight: float = 0.22
+    momentum_weight: float = 0.18
+    relative_strength_weight: float = 0.12
+    ta_weight: float = 0.12          # RSI + MACD + Bollinger
+    obi_weight: float = 0.08         # Order Book Imbalance
     funding_weight: float = 0.05     # Funding rate signal
+    whale_weight: float = 0.08       # Whale/large trade detection
+    vwap_weight: float = 0.05        # VWAP deviation signal
+    mtf_weight: float = 0.05         # Multi-timeframe confluence
+    microstructure_weight: float = 0.05  # Spread + trade flow
     min_entry_score: float = 0.6
     max_entries_per_cycle: int = 1
 
@@ -85,6 +89,8 @@ class StrategyConfig(BaseModel):
         total = (
             self.volume_weight + self.momentum_weight + self.relative_strength_weight
             + self.ta_weight + self.obi_weight + self.funding_weight
+            + self.whale_weight + self.vwap_weight + self.mtf_weight
+            + self.microstructure_weight
         )
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Strategy weights must sum to 1.0, got {total}")
@@ -176,12 +182,16 @@ class AutoTuneConfig(BaseModel):
 TUNABLE_PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     "strategy": {
         "min_entry_score": (0.05, 0.90),
-        "volume_weight": (0.05, 0.60),
-        "momentum_weight": (0.05, 0.60),
-        "relative_strength_weight": (0.05, 0.40),
-        "ta_weight": (0.0, 0.40),
-        "obi_weight": (0.0, 0.30),
-        "funding_weight": (0.0, 0.20),
+        "volume_weight": (0.05, 0.50),
+        "momentum_weight": (0.05, 0.50),
+        "relative_strength_weight": (0.05, 0.30),
+        "ta_weight": (0.0, 0.30),
+        "obi_weight": (0.0, 0.20),
+        "funding_weight": (0.0, 0.15),
+        "whale_weight": (0.0, 0.20),
+        "vwap_weight": (0.0, 0.15),
+        "mtf_weight": (0.0, 0.20),
+        "microstructure_weight": (0.0, 0.15),
     },
     "position": {
         "trailing_stop_pct": (0.03, 0.30),

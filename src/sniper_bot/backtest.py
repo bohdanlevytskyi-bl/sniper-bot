@@ -15,6 +15,8 @@ from sniper_bot.indicators import (
     compute_obi_score,
     compute_rsi,
     compute_ta_composite,
+    compute_vwap,
+    compute_multi_timeframe_score,
 )
 from sniper_bot.scanner import compute_volume_spike
 from sniper_bot.strategy import ScoredToken, compute_price_changes, rank_candidates, score_candidate
@@ -207,9 +209,22 @@ def run_backtest(
                 bbands = compute_bollinger_bands(window_1h, period=20)
                 ta = compute_ta_composite(rsi, macd, bbands)
 
+                # VWAP deviation
+                vwap_dev = 0.0
+                vwap_data = compute_vwap(window_1h, period=20)
+                if vwap_data:
+                    vwap_dev = vwap_data["deviation_pct"]
+
+                # Multi-timeframe: use 5m-equivalent and 1h signals
+                tf_signals: dict[str, float] = {"1h": ta}
+                change_5m = price_changes.get("5m", 0.0)
+                tf_signals["5m"] = max(0.0, min(1.0, 0.5 + change_5m * 20))
+                mtf = compute_multi_timeframe_score(tf_signals)
+
                 s = score_candidate(
                     sym, candles[bar_idx]["close"], spike, price_changes,
                     btc_change_1h, config.strategy, ta_composite=ta,
+                    vwap_deviation=vwap_dev, mtf_confluence=mtf,
                 )
                 scored_list.append(s)
 

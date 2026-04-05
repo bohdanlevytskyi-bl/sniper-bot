@@ -107,7 +107,7 @@ You MUST respond with a JSON object in this exact format:
 Rules:
 - Only include parameters you actually want to change. Use dotted notation (section.param_name).
 - Be conservative — small incremental adjustments preferred over large swings.
-- Strategy weights (volume_weight, momentum_weight, relative_strength_weight) must sum to 1.0.
+- Strategy weights (volume_weight, momentum_weight, relative_strength_weight, ta_weight, obi_weight, funding_weight, whale_weight, vwap_weight, mtf_weight, microstructure_weight) must sum to 1.0.
 - Reference specific data patterns to justify each change.
 - If the bot has insufficient data, say so and propose fewer changes.\
 """
@@ -478,6 +478,8 @@ def validate_proposed_changes(
     weight_keys = {
         "strategy.volume_weight", "strategy.momentum_weight", "strategy.relative_strength_weight",
         "strategy.ta_weight", "strategy.obi_weight", "strategy.funding_weight",
+        "strategy.whale_weight", "strategy.vwap_weight", "strategy.mtf_weight",
+        "strategy.microstructure_weight",
     }
     changed_weights = {k: v["new"] for k, v in applied.items() if k in weight_keys}
     if changed_weights:
@@ -489,6 +491,10 @@ def validate_proposed_changes(
             "strategy.ta_weight": config.strategy.ta_weight,
             "strategy.obi_weight": config.strategy.obi_weight,
             "strategy.funding_weight": config.strategy.funding_weight,
+            "strategy.whale_weight": config.strategy.whale_weight,
+            "strategy.vwap_weight": config.strategy.vwap_weight,
+            "strategy.mtf_weight": config.strategy.mtf_weight,
+            "strategy.microstructure_weight": config.strategy.microstructure_weight,
         }
         all_weights.update(changed_weights)
 

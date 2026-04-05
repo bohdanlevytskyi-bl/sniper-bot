@@ -165,6 +165,23 @@ class BybitClient:
         asks = [[float(p), float(q)] for p, q in result.get("a", [])]
         return {"bids": bids, "asks": asks}
 
+    def fetch_recent_trades(self, symbol: str, limit: int = 60) -> list[dict[str, Any]]:
+        """Fetch recent public trades. Returns list of {price, qty, side, time}."""
+        result = self._public_get(
+            "/v5/market/recent-trading-records",
+            {"category": "spot", "symbol": symbol, "limit": min(limit, 1000)},
+        )
+        trades: list[dict[str, Any]] = []
+        for item in result.get("list", []):
+            trades.append({
+                "price": float(item.get("price", 0)),
+                "qty": float(item.get("size", 0)),
+                "side": item.get("side", "").lower(),  # "buy" or "sell"
+                "time": datetime.fromtimestamp(int(item.get("time", 0)) / 1000, tz=timezone.utc),
+                "value": float(item.get("price", 0)) * float(item.get("size", 0)),
+            })
+        return trades
+
     def fetch_funding_rate(self, symbol: str) -> float | None:
         """Fetch current funding rate for a linear perpetual. Returns None if not available."""
         try:

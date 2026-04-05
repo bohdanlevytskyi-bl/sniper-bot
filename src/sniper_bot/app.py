@@ -299,6 +299,10 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
                     "ta_score": round(s.ta_score, 4),
                     "obi_score": round(s.obi_score, 4),
                     "funding_score": round(s.funding_score, 4),
+                    "whale_score": round(s.whale_score, 4),
+                    "vwap_score": round(s.vwap_score, 4),
+                    "mtf_score": round(s.mtf_score, 4),
+                    "micro_score": round(s.microstructure_score, 4),
                     "volume_spike_ratio": round(s.volume_spike_ratio, 4),
                     "price": s.price,
                 }
@@ -508,6 +512,10 @@ def scan_once(runtime: Runtime) -> list[dict[str, Any]]:
             "ta_score": s.ta_score,
             "obi_score": s.obi_score,
             "funding_score": s.funding_score,
+            "whale_score": s.whale_score,
+            "vwap_score": s.vwap_score,
+            "mtf_score": s.mtf_score,
+            "micro_score": s.microstructure_score,
             "spike_ratio": s.volume_spike_ratio,
             "price": s.price,
         }
@@ -616,14 +624,19 @@ def healthcheck(runtime: Runtime) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions, btc_funding: float = 0.0):
-    """Fetch klines, order book, and TA indicators for candidates and compute scores."""
+    """Fetch klines, order book, trades, and all indicators for candidates and compute scores."""
     from sniper_bot.indicators import (
         compute_bollinger_bands,
         compute_funding_rate_signal,
         compute_macd,
+        compute_multi_timeframe_score,
         compute_obi_score,
         compute_rsi,
+        compute_spread_signal,
         compute_ta_composite,
+        compute_trade_flow_toxicity,
+        compute_vwap,
+        detect_whale_trades,
     )
     from sniper_bot.strategy import ScoredToken, score_candidate, compute_price_changes
 
@@ -662,15 +675,15 @@ def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions, btc_fu
 
         # --- Order Book Imbalance ---
         obi_value = 0.0
+        ob: dict[str, list] = {"bids": [], "asks": []}
         try:
             ob = runtime.bybit.fetch_orderbook(c.symbol, depth=25)
             obi_value = compute_obi_score(ob["bids"], ob["asks"])
         except Exception:
             LOGGER.debug("orderbook_fetch_failed", extra={"symbol": c.symbol})
 
-        # --- Funding Rate Signal (use BTC funding as proxy for all pairs) ---
+        # --- Funding Rate Signal ---
         funding_signal = compute_funding_rate_signal(btc_funding) if btc_funding else 0.0
-        # If the pair has its own perp, try to get its specific funding
         try:
             pair_funding = runtime.bybit.fetch_funding_rate(c.symbol)
             if pair_funding is not None:
@@ -678,12 +691,71 @@ def _enrich_and_score(runtime, candidates, btc_change_1h, open_positions, btc_fu
         except Exception:
             pass
 
+        # --- Phase 3: Whale Detection ---
+        whale_signal = 0.0
+        recent_trades: list[dict] = []
+        try:
+            recent_trades = runtime.bybit.fetch_recent_trades(c.symbol, limit=60)
+            whale_data = detect_whale_trades(recent_trades, std_multiplier=3.0)
+            whale_signal = whale_data["whale_score"]
+        except Exception:
+            LOGGER.debug("whale_detection_failed", extra={"symbol": c.symbol})
+
+        # --- Phase 3: VWAP ---
+        vwap_deviation = 0.0
+        vwap_data = compute_vwap(candles_1h, period=20)
+        if vwap_data:
+            vwap_deviation = vwap_data["deviation_pct"]
+
+        # --- Phase 3: Multi-Timeframe Confluence ---
+        tf_signals: dict[str, float] = {}
+        # 5m signal from short-term momentum
+        if candles_5m and len(candles_5m) >= 3:
+            change_5m = price_changes.get("5m", 0.0)
+            tf_signals["5m"] = max(0.0, min(1.0, 0.5 + change_5m * 20))
+        # 1h signal from TA composite
+        tf_signals["1h"] = ta_composite
+        # 4h signal: fetch if possible, otherwise derive from 1h
+        try:
+            candles_4h = runtime.bybit.fetch_klines(c.symbol, 240, limit=10)
+            rsi_4h = compute_rsi(candles_4h, period=7)
+            if rsi_4h is not None:
+                # Map RSI: 30→0.8, 50→0.5, 70→0.2
+                tf_signals["4h"] = max(0.0, min(1.0, 1.0 - rsi_4h / 100.0))
+        except Exception:
+            pass
+        mtf_confluence = compute_multi_timeframe_score(tf_signals)
+
+        # --- Phase 3: Microstructure (spread + trade flow) ---
+        spread_score = compute_spread_signal(c.low_24h if hasattr(c, 'low_24h') else 0, c.high_24h if hasattr(c, 'high_24h') else 0, c.last_price)
+        # Use bid/ask from ticker if available
+        if hasattr(c, 'last_price') and c.last_price > 0:
+            # Use orderbook data if we fetched it
+            try:
+                spread_score = compute_spread_signal(ob["bids"][0][0] if ob.get("bids") else c.last_price, ob["asks"][0][0] if ob.get("asks") else c.last_price, c.last_price)
+            except Exception:
+                pass
+        toxicity = 0.0
+        try:
+            if not recent_trades:
+                recent_trades = runtime.bybit.fetch_recent_trades(c.symbol, limit=60)
+            toxicity = compute_trade_flow_toxicity(recent_trades)
+        except Exception:
+            pass
+        # Microstructure score: high spread quality + low toxicity = good
+        # Toxicity can be directional signal when combined with whale data
+        micro_score = spread_score * (1.0 - toxicity * 0.5)
+
         s = score_candidate(
             c.symbol, c.last_price, spike_ratio, price_changes, btc_change_1h,
             runtime.config.strategy,
             ta_composite=ta_composite,
             obi_value=obi_value,
             funding_signal=funding_signal,
+            whale_signal=whale_signal,
+            vwap_deviation=vwap_deviation,
+            mtf_confluence=mtf_confluence,
+            microstructure=micro_score,
         )
         scored.append(s)
 

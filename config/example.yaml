@@ -20,9 +20,16 @@ scanner:
 strategy:
   volume_spike_threshold: 3.0
   momentum_windows_minutes: [5, 15, 60]
-  volume_weight: 0.4
-  momentum_weight: 0.4
-  relative_strength_weight: 0.2
+  volume_weight: 0.22
+  momentum_weight: 0.18
+  relative_strength_weight: 0.12
+  ta_weight: 0.12
+  obi_weight: 0.08
+  funding_weight: 0.05
+  whale_weight: 0.08
+  vwap_weight: 0.05
+  mtf_weight: 0.05
+  microstructure_weight: 0.05
   min_entry_score: 0.4
   max_entries_per_cycle: 1
 
@@ -36,6 +43,7 @@ position:
 
 risk:
   max_position_pct: 0.20
+  regime_gate_enabled: false
   max_concurrent_positions: 2
   max_portfolio_exposure_pct: 0.40
   max_daily_loss_pct: 0.10
@@ -53,6 +61,7 @@ auto_tune:
   enabled: true               # set to true to enable AI auto-tuning
   tune_every_n_cycles: 100     # every ~50 minutes
   openai_model: gpt-5.4
+  secondary_model: gpt-4.5
   max_change_pct: 0.30         # max 30% change per parameter per tune
   require_min_cycles: 200      # need at least 200 cycles of data
   require_min_trades: 3        # need at least 3 closed trades
