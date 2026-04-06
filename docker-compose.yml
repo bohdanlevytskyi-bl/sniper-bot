@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: sniper-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot-data:/app/config/data
+      - bot-logs:/app/config/logs
+    command: sniper-bot run -c /app/config/example.yaml
+
+  dashboard:
+    build: .
+    container_name: sniper-dashboard
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - bot-data:/app/config/data
+    command: sniper-bot dashboard -c /app/config/example.yaml --host 0.0.0.0
+
+volumes:
+  bot-data:
+  bot-logs:

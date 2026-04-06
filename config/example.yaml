@@ -60,7 +60,7 @@ execution:
 auto_tune:
   enabled: true               # set to true to enable AI auto-tuning
   tune_every_n_cycles: 100     # every ~50 minutes
-  openai_model: gpt-5.4
+  openai_model: gpt-5.1
   secondary_model: gpt-4.5
   max_change_pct: 0.30         # max 30% change per parameter per tune
   require_min_cycles: 200      # need at least 200 cycles of data

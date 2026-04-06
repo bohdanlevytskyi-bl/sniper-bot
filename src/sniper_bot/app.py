@@ -321,9 +321,9 @@ def process_once(runtime: Runtime) -> dict[str, Any]:
             if config.risk.use_kelly:
                 from sniper_bot.risk import compute_kelly_pct
                 from sniper_bot.storage import Position as PositionModel
-                from sqlalchemy import desc as desc_
+                from sqlalchemy import desc as desc_, select as select_
                 closed = list(session.scalars(
-                    select(PositionModel)
+                    select_(PositionModel)
                     .where(PositionModel.mode == mode, PositionModel.status == "closed")
                     .order_by(desc_(PositionModel.exit_time))
                     .limit(100)
